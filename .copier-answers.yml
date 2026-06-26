@@ -1,0 +1,11 @@
+# Do not edit - changes here will be overwritten by Copier
+_commit: v1
+_src_path: gh:pydev-guide/pyrepo-copier
+author_email: davidetorre99@gmail.com
+author_name: davide torre
+github_username: davidetorre99
+mode: tooling
+module_name: torch_tilt_series
+project_name: torch-tilt-series
+project_short_description: tilt series
+
