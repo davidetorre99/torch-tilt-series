@@ -17,11 +17,14 @@ sources = ["src"]
 [project]
 name = "torch-tilt-series"
 dynamic = ["version"]
-description = "tilt series"
+description = "Tilt series data structure, projection and subtilt extraction for cryo-ET."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "BSD-3-Clause" }
-authors = [{ name = "Davide Torre", email = "davidetorre99@gmail.com" }]
+authors = [
+    { name = "Marten Chaillet", email = "martenchaillet@gmail.com" },
+    { name = "Davide Torre", email = "davidetorre99@gmail.com" },
+]
 # https://pypi.org/classifiers/
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -35,12 +38,19 @@ classifiers = [
     "Typing :: Typed",
 ]
 # add your package dependencies here
-dependencies = []
+dependencies = [
+    "numpy",
+    "einops",
+    "torch",
+    "torch-grid-utils>=0.0.8",
+    "torch-affine-utils",
+    "torch-subpixel-crop",
+]
 
 # https://peps.python.org/pep-0621/#dependencies-optional-dependencies
 # add dependencies for "extra" features here.  Not dev dependencies.
-# [project.optional-dependencies]
-# name = ["dependency"]
+[project.optional-dependencies]
+io = ["mrcfile", "alnfile", "etomofiles"]
 
 [project.urls]
 homepage = "https://github.com/teamtomo/torch-tilt-series"
@@ -62,7 +72,7 @@ changelog = "https://github.com/teamtomo/torch-tilt-series#changelog"
 # https://peps.python.org/pep-0735/
 # setup with `uv sync` or `pip install -e . --group dev`
 [dependency-groups]
-test = ["pytest", "pytest-cov"]
+test = ["pytest", "pytest-cov", "mrcfile", "alnfile"]
 dev = [
     { include-group = "test" },
     "ipython",

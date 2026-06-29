@@ -6,29 +6,35 @@
 [![CI](https://github.com/teamtomo/torch-tilt-series/actions/workflows/ci.yml/badge.svg)](https://github.com/teamtomo/torch-tilt-series/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/teamtomo/torch-tilt-series/branch/main/graph/badge.svg)](https://codecov.io/gh/teamtomo/torch-tilt-series)
 
-tilt series
+Tilt series data structure, projection and subtilt extraction for cryo-ET.
 
-## Development
+## Overview
 
-The easiest way to get started is to use the [github cli](https://cli.github.com)
-and [uv](https://docs.astral.sh/uv/getting-started/installation/):
+This package provides a `TiltSeries` class for working with cryo-ET tilt series in PyTorch. It supports
 
-```sh
-gh repo fork teamtomo/torch-tilt-series --clone
-# or just
-# gh repo clone teamtomo/torch-tilt-series
-cd torch-tilt-series
-uv sync
+* loading alignment data from AreTomo (`.aln`) and ETOMO directories using [`alnfile`](https://github.com/teamtomo/alnfile) and [`etomofiles`](https://github.com/teamtomo/etomofiles)
+* storing tilt series metadata (e.g. tilt images, tilt angles, tilt axis angles, translations and pixel spacing)
+* computing projection matrices and projecting 3D points into 2D image coordinates
+* extracting subtilt-series at 3D locations in the sample
+
+All 3D positions are in `zyx` coordinates, in Angstroms, relative to the tomogram center. Translations are stored in Angstroms as `(y, x)`.
+
+## Installation
+
+```bash
+pip install torch-tilt-series
 ```
 
-Run tests:
+To load alignment data from AreTomo or ETOMO files, install the optional IO dependencies:
 
-```sh
-uv run pytest
+```bash
+pip install torch-tilt-series[io]
 ```
 
-Lint files:
+## Examples
 
-```sh
-uv run pre-commit run --all-files
-```
+See the [`examples/`](examples/) folder for scripts showing how to load a tilt series and use the API.
+
+## License
+
+This project is licensed under the BSD 3-Clause License - see the LICENSE file for details.
