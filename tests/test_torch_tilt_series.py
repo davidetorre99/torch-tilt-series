@@ -15,7 +15,7 @@ def make_tilt_series(device="cpu", size=32, square=False):
     images = torch.zeros((3, size, size))
     if square:
         c = size // 2
-        images[:, c - 2:c + 2, c - 2:c + 2] = 1.0
+        images[:, c - 2 : c + 2, c - 2 : c + 2] = 1.0
     return TiltSeries(
         tilt_angles=tilt_angles,
         tilt_axis_angle=tilt_axis_angle,
@@ -72,6 +72,55 @@ def test_projection_matrix_identity_at_zero_geometry():
     assert torch.allclose(ts.projection_matrices[0], torch.eye(4), atol=1e-6)
 
 
+def test_x_tilt_default_is_identity():
+    # x_tilts defaults to 0, so the geometry must be unchanged from the 2-angle model.
+    ts = make_tilt_series()
+    assert torch.allclose(ts.x_tilts, torch.zeros_like(ts.x_tilts))
+    rx = ts.projection_matrices  # noqa: F841 - exercises the Rx code path at angle 0
+    expected = TiltSeries(
+        tilt_angles=torch.tensor([-30.0, 0.0, 30.0]),
+        tilt_axis_angle=torch.tensor(0.0),
+        sample_translations=torch.zeros((3, 2)),
+        images=torch.zeros((3, 32, 32)),
+        pixel_spacing=1.0,
+    ).projection_matrices
+    assert torch.allclose(ts.projection_matrices, expected, atol=1e-6)
+
+
+def test_x_tilt_rotates_about_x_axis():
+    # A pure x-axis tilt (no stage tilt / no in-plane angle) must rotate points
+    # about the X axis: the X coordinate is invariant, while (z, y) mix.
+    ts = TiltSeries(
+        tilt_angles=torch.tensor([0.0]),
+        tilt_axis_angle=torch.tensor(0.0),
+        sample_translations=torch.zeros((1, 2)),
+        images=torch.zeros((1, 8, 8)),
+        pixel_spacing=1.0,
+        x_tilts=90.0,
+    )
+    rot = ts.projection_matrices[0, :3, :3]  # zyx rotation block
+    # point on the X axis (z=0, y=0, x=1) is unchanged by a rotation about X
+    x_axis = torch.tensor([0.0, 0.0, 1.0])
+    assert torch.allclose(rot @ x_axis, x_axis, atol=1e-6)
+    # a point on the Y axis (z=0, y=1, x=0) maps onto the Z axis under a +90 deg turn
+    y_axis = torch.tensor([0.0, 1.0, 0.0])
+    mapped = rot @ y_axis
+    assert torch.allclose(mapped[2], torch.tensor(0.0), atol=1e-6)  # x stays 0
+    assert torch.isclose(torch.linalg.norm(mapped), torch.tensor(1.0), atol=1e-6)
+
+
+def test_x_tilt_per_view_shape():
+    ts = TiltSeries(
+        tilt_angles=torch.tensor([-30.0, 0.0, 30.0]),
+        tilt_axis_angle=torch.tensor(0.0),
+        sample_translations=torch.zeros((3, 2)),
+        images=torch.zeros((3, 8, 8)),
+        pixel_spacing=1.0,
+        x_tilts=torch.tensor([-0.37, -0.30, -0.25]),
+    )
+    assert ts.projection_matrices.shape == (3, 4, 4)
+
+
 @pytest.mark.parametrize("device", DEVICES)
 def test_project_points_origin(device):
     ts = make_tilt_series(device)
@@ -123,6 +172,7 @@ def test_device_move():
     assert "cuda" in str(ts.tilt_angles.device)
     assert "cuda" in str(ts.tilt_axis_angle.device)
     assert "cuda" in str(ts.sample_translations.device)
+    assert "cuda" in str(ts.x_tilts.device)
 
 
 def test_from_aretomo_output(tmp_path):
@@ -155,3 +205,55 @@ def test_from_aretomo_output(tmp_path):
     # tx/ty are stored as (y, x) in Angstroms == (ty, tx) * pixel_spacing
     expected = torch.tensor([[2.0, 1.0], [0.0, 0.0], [-2.0, -1.0]]) * pixel_spacing
     assert torch.allclose(ts.sample_translations, expected)
+
+
+def test_from_etomo_directory(tmp_path):
+    pytest.importorskip("etomofiles")
+    mrcfile = pytest.importorskip("mrcfile")
+
+    (tmp_path / "ts.edf").write_text(
+        "Setup.DatasetName=ts\nSetup.RawImageStackExt=st\nSetup.ImageRotationA=0.0\n"
+    )
+    (tmp_path / "ts.tlt").write_text("-30.0\n0.0\n30.0\n")
+    (tmp_path / "ts.rawtlt").write_text("-30.0\n0.0\n30.0\n")
+    (tmp_path / "ts.xtilt").write_text("0.0\n0.0\n0.0\n")
+    (tmp_path / "ts.xf").write_text(
+        "1.0 0.0 0.0 1.0  1.0  2.0\n"
+        "1.0 0.0 0.0 1.0  0.0  0.0\n"
+        "1.0 0.0 0.0 1.0 -1.0 -2.0\n"
+    )
+    images = np.random.default_rng(0).normal(size=(3, 16, 16)).astype(np.float32)
+    mrcfile.write(tmp_path / "ts.st", images, overwrite=True)
+
+    pixel_spacing = 2.0
+    ts = TiltSeries.from_etomo_directory(tmp_path, pixel_spacing=pixel_spacing)
+
+    assert ts.images.shape == (3, 16, 16)
+    assert ts.pixel_spacing == pixel_spacing
+    assert torch.allclose(ts.tilt_angles, torch.tensor([-30.0, 0.0, 30.0]))
+    assert torch.allclose(ts.tilt_axis_angle, torch.zeros(3))
+    expected = torch.tensor([[-4.0, -2.0], [0.0, 0.0], [4.0, 2.0]])
+    assert torch.allclose(ts.sample_translations, expected)
+    assert torch.allclose(ts.x_tilts, torch.zeros(3))
+
+
+def test_from_etomo_directory_reads_xtilt(tmp_path):
+    pytest.importorskip("etomofiles")
+    mrcfile = pytest.importorskip("mrcfile")
+
+    (tmp_path / "ts.edf").write_text(
+        "Setup.DatasetName=ts\nSetup.RawImageStackExt=st\nSetup.ImageRotationA=0.0\n"
+    )
+    (tmp_path / "ts.tlt").write_text("-30.0\n0.0\n30.0\n")
+    (tmp_path / "ts.rawtlt").write_text("-30.0\n0.0\n30.0\n")
+    (tmp_path / "ts.xtilt").write_text("-0.37\n-0.30\n-0.25\n")
+    (tmp_path / "ts.xf").write_text(
+        "1.0 0.0 0.0 1.0  0.0  0.0\n"
+        "1.0 0.0 0.0 1.0  0.0  0.0\n"
+        "1.0 0.0 0.0 1.0  0.0  0.0\n"
+    )
+    images = np.random.default_rng(0).normal(size=(3, 16, 16)).astype(np.float32)
+    mrcfile.write(tmp_path / "ts.st", images, overwrite=True)
+
+    ts = TiltSeries.from_etomo_directory(tmp_path, pixel_spacing=2.0)
+    assert torch.allclose(ts.x_tilts, torch.tensor([-0.37, -0.30, -0.25]), atol=1e-5)

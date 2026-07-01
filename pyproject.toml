@@ -71,7 +71,7 @@ changelog = "https://github.com/teamtomo/torch-tilt-series#changelog"
 # https://peps.python.org/pep-0735/
 # setup with `uv sync` or `pip install -e . --group dev`
 [dependency-groups]
-test = ["pytest", "pytest-cov", "mrcfile", "alnfile"]
+test = ["pytest", "pytest-cov", "mrcfile", "alnfile", "etomofiles"]
 dev = [
     { include-group = "test" },
     "ipython",
