@@ -17,17 +17,19 @@ sources = ["src"]
 [project]
 name = "torch-tilt-series"
 dynamic = ["version"]
-description = "tilt series"
+description = "Tilt series data structure, projection and subtilt extraction for cryo-ET."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "BSD-3-Clause" }
-authors = [{ name = "Davide Torre", email = "davidetorre99@gmail.com" }]
+authors = [
+    { name = "Marten Chaillet", email = "martenchaillet@gmail.com" },
+    { name = "Davide Torre", email = "davidetorre99@gmail.com" },
+]
 # https://pypi.org/classifiers/
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: BSD License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -35,12 +37,19 @@ classifiers = [
     "Typing :: Typed",
 ]
 # add your package dependencies here
-dependencies = []
+dependencies = [
+    "numpy",
+    "einops",
+    "torch",
+    "torch-grid-utils>=0.0.8",
+    "torch-affine-utils",
+    "torch-subpixel-crop",
+]
 
 # https://peps.python.org/pep-0621/#dependencies-optional-dependencies
 # add dependencies for "extra" features here.  Not dev dependencies.
-# [project.optional-dependencies]
-# name = ["dependency"]
+[project.optional-dependencies]
+io = ["mrcfile", "alnfile", "etomofiles"]
 
 [project.urls]
 homepage = "https://github.com/teamtomo/torch-tilt-series"
@@ -62,7 +71,7 @@ changelog = "https://github.com/teamtomo/torch-tilt-series#changelog"
 # https://peps.python.org/pep-0735/
 # setup with `uv sync` or `pip install -e . --group dev`
 [dependency-groups]
-test = ["pytest", "pytest-cov"]
+test = ["pytest", "pytest-cov", "mrcfile", "alnfile", "etomofiles"]
 dev = [
     { include-group = "test" },
     "ipython",
@@ -79,7 +88,7 @@ torch-tilt-series = { workspace = true }
 # https://docs.astral.sh/ruff
 [tool.ruff]
 line-length = 88
-target-version = "py310"
+target-version = "py311"
 src = ["src"]
 fix = true
 # unsafe-fixes = true
@@ -119,7 +128,11 @@ skip-magic-trailing-comma = false  # default is false
 minversion = "7.0"
 addopts = ["--color=yes"]
 testpaths = ["tests"]
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # mrcfile 1.5.x triggers this when reading MRC headers with NumPy >= 2.5
+    "ignore:Setting the dtype on a NumPy array has been deprecated:DeprecationWarning",
+]
 
 # https://mypy.readthedocs.io/en/stable/config_file.html
 [tool.mypy]
