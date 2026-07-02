@@ -10,10 +10,20 @@ from torch_affine_utils import homogenise_coordinates
 from torch_affine_utils.transforms_3d import Rx, Ry, Rz, T
 
 
-def _as_tensor(data, device: torch.device | str) -> torch.Tensor:
+def _writable(data):
+    """Copy non-writable numpy arrays (e.g. pandas .to_numpy() views) before
+    handing them to torch, which warns (and, with filterwarnings=["error"],
+    fails) on non-writable arrays -- whether a given array is writable can
+    depend on the numpy/pandas versions in use, so this must be applied to
+    every numpy array we hand to torch, not just some.
+    """
     if isinstance(data, np.ndarray) and not data.flags.writeable:
         data = data.copy()
-    return torch.as_tensor(data, device=device).float()
+    return data
+
+
+def _as_tensor(data, device: torch.device | str) -> torch.Tensor:
+    return torch.as_tensor(_writable(data), device=device).float()
 
 
 class TiltSeries:
@@ -80,7 +90,9 @@ class TiltSeries:
         )
         self.image_path = Path(image_path) if image_path is not None else None
         self.image_indices = (
-            torch.as_tensor(image_indices).long() if image_indices is not None else None
+            torch.as_tensor(_writable(image_indices)).long()
+            if image_indices is not None
+            else None
         )
         self.pixel_spacing = pixel_spacing
         self.device = device
@@ -167,7 +179,7 @@ class TiltSeries:
         - projected 2D points are in Angstroms, relative to the center of
           the detector
         """
-        points_zyx = torch.as_tensor(points_zyx, device=self.device).float()
+        points_zyx = torch.as_tensor(_writable(points_zyx), device=self.device).float()
 
         # tomogram space -> sample space (identity by default: no-op)
         points_zyxw = homogenise_coordinates(points_zyx)  # (n_points, 4)
