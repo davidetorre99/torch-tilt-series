@@ -22,11 +22,12 @@ tilt_series = TiltSeries.from_aretomo_output(
     device=DEVICE,
 )
 
-# Project a 3D point (zyx, Angstroms, relative to tomogram center) into each tilt
+# Project a 3D point (zyx, Angstroms, relative to tomogram center) into each
+# tilt -> 2D detector positions (yx, Angstroms, relative to detector center)
 points_zyx = torch.tensor([[0.0, 0.0, 0.0]], device=DEVICE)
 projected_yx = tilt_series.project_points(points_zyx)
 
-# Extract a subtilt-series around the point
-particle_tilt_series = tilt_series.extract_particle_tilt_series(
-    points_zyx, sidelength=64, return_rfft=False
-)
+# tilt_series.image_path / tilt_series.image_indices describe where the
+# matching raw tilt images live and how to select/order them; TiltSeries
+# itself never loads image data. See torch-reconstruct-tomogram for loading,
+# normalizing, and extracting subtilt-series / reconstructing subvolumes.

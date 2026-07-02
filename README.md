@@ -10,14 +10,16 @@ Tilt series data structure, projection and subtilt extraction for cryo-ET.
 
 ## Overview
 
-This package provides a `TiltSeries` class for working with cryo-ET tilt series in PyTorch. It supports
+This package provides a `TiltSeries` class for working with cryo-ET tilt series alignment geometry in PyTorch. It supports
 
-* loading alignment data from AreTomo (`.aln`) and ETOMO directories using [`alnfile`](https://github.com/teamtomo/alnfile) and [`etomofiles`](https://github.com/teamtomo/etomofiles)
-* storing tilt series metadata (e.g. tilt images, tilt angles, tilt axis angles, translations and pixel spacing)
-* computing projection matrices and projecting 3D points into 2D image coordinates
-* extracting subtilt-series at 3D locations in the sample
+* loading alignment metadata from AreTomo (`.aln`) and ETOMO directories using [`alnfile`](https://github.com/teamtomo/alnfile) and [`etomofiles`](https://github.com/teamtomo/etomofiles)
+* storing tilt series alignment parameters (tilt angles, tilt axis angles, translations, x-tilts) and coordinate-space transforms (see the `TiltSeries` docstring)
+* computing projection matrices and projecting 3D points into 2D detector coordinates
 
-All 3D positions are in `zyx` coordinates, in Angstroms, relative to the tomogram center. Translations are stored in Angstroms as `(y, x)`.
+All 3D/2D positions are in `zyx`/`yx` coordinates, in Angstroms, relative to the tomogram/detector center. Translations are stored in Angstroms as `(y, x)`.
+
+Subtilt/subvolume extraction and full volume reconstruction live in [`torch-reconstruct-tomogram`](https://github.com/teamtomo/torch-reconstruct-tomogram).
+
 
 ## Installation
 

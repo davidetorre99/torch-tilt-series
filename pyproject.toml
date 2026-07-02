@@ -41,15 +41,13 @@ dependencies = [
     "numpy",
     "einops",
     "torch",
-    "torch-grid-utils>=0.0.8",
     "torch-affine-utils",
-    "torch-subpixel-crop",
 ]
 
 # https://peps.python.org/pep-0621/#dependencies-optional-dependencies
 # add dependencies for "extra" features here.  Not dev dependencies.
 [project.optional-dependencies]
-io = ["mrcfile", "alnfile", "etomofiles"]
+io = ["alnfile", "etomofiles"]
 
 [project.urls]
 homepage = "https://github.com/teamtomo/torch-tilt-series"

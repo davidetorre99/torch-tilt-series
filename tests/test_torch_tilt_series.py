@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 import torch
+from torch_affine_utils.transforms_3d import Rz, T
 
 import torch_tilt_series
 from torch_tilt_series import TiltSeries
@@ -8,20 +9,14 @@ from torch_tilt_series import TiltSeries
 DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
 
 
-def make_tilt_series(device="cpu", size=32, square=False):
+def make_tilt_series(device="cpu"):
     tilt_angles = torch.tensor([-30.0, 0.0, 30.0])
     tilt_axis_angle = torch.tensor(0.0)
     sample_translations = torch.zeros((3, 2))
-    images = torch.zeros((3, size, size))
-    if square:
-        c = size // 2
-        images[:, c - 2 : c + 2, c - 2 : c + 2] = 1.0
     return TiltSeries(
         tilt_angles=tilt_angles,
         tilt_axis_angle=tilt_axis_angle,
         sample_translations=sample_translations,
-        images=images,
-        pixel_spacing=1.0,
         device=device,
     )
 
@@ -33,23 +28,12 @@ def test_imports_with_version():
 @pytest.mark.parametrize("device", DEVICES)
 def test_construction(device):
     ts = make_tilt_series(device)
-    assert ts.images.shape == (3, 32, 32)
-    assert ts.images.dtype == torch.float32
     assert ts.tilt_angles.shape == (3,)
-    assert device in str(ts.images.device)
-
-
-def test_sample_translations_px():
-    tilt_angles = torch.tensor([0.0])
-    sample_translations = torch.tensor([[10.0, 20.0]])
-    ts = TiltSeries(
-        tilt_angles=tilt_angles,
-        tilt_axis_angle=torch.tensor(0.0),
-        sample_translations=sample_translations,
-        images=torch.zeros((1, 8, 8)),
-        pixel_spacing=2.0,
-    )
-    assert torch.allclose(ts.sample_translations_px, torch.tensor([[5.0, 10.0]]))
+    assert ts.tilt_angles.dtype == torch.float32
+    assert device in str(ts.tilt_angles.device)
+    assert ts.image_path is None
+    assert ts.image_indices is None
+    assert ts.pixel_spacing is None
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -66,8 +50,6 @@ def test_projection_matrix_identity_at_zero_geometry():
         tilt_angles=torch.tensor([0.0]),
         tilt_axis_angle=torch.tensor(0.0),
         sample_translations=torch.zeros((1, 2)),
-        images=torch.zeros((1, 8, 8)),
-        pixel_spacing=1.0,
     )
     assert torch.allclose(ts.projection_matrices[0], torch.eye(4), atol=1e-6)
 
@@ -81,8 +63,6 @@ def test_x_tilt_default_is_identity():
         tilt_angles=torch.tensor([-30.0, 0.0, 30.0]),
         tilt_axis_angle=torch.tensor(0.0),
         sample_translations=torch.zeros((3, 2)),
-        images=torch.zeros((3, 32, 32)),
-        pixel_spacing=1.0,
     ).projection_matrices
     assert torch.allclose(ts.projection_matrices, expected, atol=1e-6)
 
@@ -94,8 +74,6 @@ def test_x_tilt_rotates_about_x_axis():
         tilt_angles=torch.tensor([0.0]),
         tilt_axis_angle=torch.tensor(0.0),
         sample_translations=torch.zeros((1, 2)),
-        images=torch.zeros((1, 8, 8)),
-        pixel_spacing=1.0,
         x_tilts=90.0,
     )
     rot = ts.projection_matrices[0, :3, :3]  # zyx rotation block
@@ -114,11 +92,156 @@ def test_x_tilt_per_view_shape():
         tilt_angles=torch.tensor([-30.0, 0.0, 30.0]),
         tilt_axis_angle=torch.tensor(0.0),
         sample_translations=torch.zeros((3, 2)),
-        images=torch.zeros((3, 8, 8)),
-        pixel_spacing=1.0,
         x_tilts=torch.tensor([-0.37, -0.30, -0.25]),
     )
     assert ts.projection_matrices.shape == (3, 4, 4)
+
+
+def test_sample2scope_is_pure_rotation():
+    ts = TiltSeries(
+        tilt_angles=torch.tensor([-30.0, 0.0, 30.0]),
+        tilt_axis_angle=torch.tensor([10.0, -5.0, 20.0]),
+        sample_translations=torch.rand((3, 2)) * 10,
+        x_tilts=torch.tensor([-0.4, 0.1, 0.3]),
+    )
+    m = ts.sample2scope
+    assert m.shape == (3, 4, 4)
+    # translation column is exactly zero
+    assert torch.allclose(m[:, :3, 3], torch.zeros(3, 3), atol=1e-6)
+    # 3x3 rotation block is orthogonal: R @ R.T == I
+    rot = m[:, :3, :3]
+    eye = torch.eye(3).expand(3, 3, 3)
+    assert torch.allclose(rot @ rot.transpose(-1, -2), eye, atol=1e-5)
+
+
+def test_scope2detector_only_mixes_yx():
+    ts = TiltSeries(
+        tilt_angles=torch.tensor([0.0]),
+        tilt_axis_angle=torch.tensor([37.0]),
+        sample_translations=torch.tensor([[3.0, -2.0]]),
+    )
+    m = ts.scope2detector[0]
+    # z row: output z depends only on input z, unit coefficient, no shift
+    assert torch.allclose(m[0], torch.tensor([1.0, 0.0, 0.0, 0.0]), atol=1e-6)
+    # no y/x output depends on z input
+    assert torch.allclose(m[1:3, 0], torch.zeros(2), atol=1e-6)
+    # y/x block is a proper 2D rotation (orthogonal) plus the known shift
+    rot_yx = m[1:3, 1:3]
+    assert torch.allclose(rot_yx @ rot_yx.T, torch.eye(2), atol=1e-5)
+    assert torch.allclose(m[1:3, 3], torch.tensor([3.0, -2.0]), atol=1e-6)
+
+
+def test_projection_matrices_equals_composition():
+    torch.manual_seed(0)
+    n = 5
+    ts = TiltSeries(
+        tilt_angles=torch.rand(n) * 60 - 30,
+        tilt_axis_angle=torch.rand(n) * 360,
+        sample_translations=torch.randn(n, 2) * 5,
+        x_tilts=torch.randn(n) * 2,
+    )
+    assert torch.allclose(
+        ts.projection_matrices, ts.scope2detector @ ts.sample2scope, atol=1e-6
+    )
+
+
+def test_scope2sample_is_inverse_of_sample2scope():
+    ts = TiltSeries(
+        tilt_angles=torch.tensor([-30.0, 0.0, 30.0]),
+        tilt_axis_angle=torch.tensor(0.0),
+        sample_translations=torch.zeros((3, 2)),
+        x_tilts=torch.tensor([-0.4, 0.1, 0.3]),
+    )
+    eye = torch.eye(4).expand(3, 4, 4)
+    assert torch.allclose(ts.sample2scope @ ts.scope2sample, eye, atol=1e-5)
+
+
+def test_detector2scope_is_inverse_of_scope2detector():
+    ts = TiltSeries(
+        tilt_angles=torch.tensor([-30.0, 0.0, 30.0]),
+        tilt_axis_angle=torch.tensor([10.0, -5.0, 20.0]),
+        sample_translations=torch.randn(3, 2) * 5,
+    )
+    eye = torch.eye(4).expand(3, 4, 4)
+    assert torch.allclose(ts.scope2detector @ ts.detector2scope, eye, atol=1e-5)
+
+
+def test_tomo2sample_is_inverse_of_sample2tomo():
+    ts_default = make_tilt_series()
+    assert torch.allclose(
+        ts_default.sample2tomo @ ts_default.tomo2sample, torch.eye(4), atol=1e-6
+    )
+
+    sample2tomo = T(torch.tensor([1.0, -2.0, 3.0]), device="cpu") @ Rz(
+        torch.tensor(40.0), zyx=True, device="cpu"
+    )
+    ts = TiltSeries(
+        tilt_angles=torch.tensor([0.0]),
+        tilt_axis_angle=torch.tensor(0.0),
+        sample_translations=torch.zeros((1, 2)),
+        sample2tomo=sample2tomo,
+    )
+    assert torch.allclose(ts.sample2tomo @ ts.tomo2sample, torch.eye(4), atol=1e-5)
+
+
+def test_sample2tomo_default_is_identity_no_behavior_change():
+    ts = make_tilt_series()
+    assert torch.allclose(ts.sample2tomo, torch.eye(4))
+    assert torch.allclose(ts.tomo2sample, torch.eye(4))
+    points = torch.tensor([[0.0, 7.0, -4.0], [1.0, -2.0, 3.0]])
+    with_default = ts.project_points(points)
+    ts_explicit = TiltSeries(
+        tilt_angles=torch.tensor([-30.0, 0.0, 30.0]),
+        tilt_axis_angle=torch.tensor(0.0),
+        sample_translations=torch.zeros((3, 2)),
+        sample2tomo=torch.eye(4),
+    )
+    assert torch.allclose(with_default, ts_explicit.project_points(points), atol=1e-6)
+
+
+def test_sample2tomo_pure_translation_shifts_projection():
+    # sample2tomo = T(shift) maps p_sample -> p_sample + shift, i.e. a point
+    # at sample-space position p has tomogram-space coordinate p + shift.
+    # So tomo2sample = T(-shift): recovering the sample-space point from a
+    # tomogram-space coordinate requires *subtracting* the shift.
+    shift_zyx = torch.tensor([2.0, -3.0, 5.0])
+    sample2tomo = T(shift_zyx, device="cpu")
+    ts_notomo = make_tilt_series()
+    ts_tomo = TiltSeries(
+        tilt_angles=torch.tensor([-30.0, 0.0, 30.0]),
+        tilt_axis_angle=torch.tensor(0.0),
+        sample_translations=torch.zeros((3, 2)),
+        sample2tomo=sample2tomo,
+    )
+    point_tomo = torch.tensor([[0.0, 0.0, 0.0]])
+    point_sample_equivalent = point_tomo - shift_zyx
+    assert torch.allclose(
+        ts_tomo.project_points(point_tomo),
+        ts_notomo.project_points(point_sample_equivalent),
+        atol=1e-5,
+    )
+
+
+def test_sample2tomo_pure_rotation_matches_manual_transform():
+    # A 90 degree Rz sample2tomo: points_tomo -> tomo2sample -> points_sample
+    # should equal applying tomo2sample directly, computed independently.
+    sample2tomo = Rz(torch.tensor(90.0), zyx=True, device="cpu")
+    ts_notomo = make_tilt_series()
+    ts_tomo = TiltSeries(
+        tilt_angles=torch.tensor([-30.0, 0.0, 30.0]),
+        tilt_axis_angle=torch.tensor(0.0),
+        sample_translations=torch.zeros((3, 2)),
+        sample2tomo=sample2tomo,
+    )
+    point_tomo = torch.tensor([[0.0, 1.0, 0.0]])  # pure +y in tomo space
+    tomo2sample = torch.linalg.inv(sample2tomo)
+    point_tomo_w = torch.cat([point_tomo, torch.ones(1, 1)], dim=-1)
+    point_sample = (point_tomo_w @ tomo2sample.T)[:, :3]
+    assert torch.allclose(
+        ts_tomo.project_points(point_tomo),
+        ts_notomo.project_points(point_sample),
+        atol=1e-5,
+    )
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -146,38 +269,20 @@ def test_project_points_batch_shapes():
     assert ts.project_points(points).shape == (5, 3, 2)
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_extract_particle_tilt_series(device):
-    ts = make_tilt_series(device, square=True)
-    points_zyx = torch.tensor([[0.0, 0.0, 0.0]], device=device)
-
-    real = ts.extract_particle_tilt_series(points_zyx, sidelength=8, return_rfft=False)
-    assert real.shape == (1, 3, 8, 8)
-    assert real.dtype == torch.float32
-    assert device in str(real.device)
-    # the square sits at the image centre, so the extracted patch is non-zero
-    assert float(real.abs().sum()) > 0
-
-    rfft = ts.extract_particle_tilt_series(points_zyx, sidelength=8, return_rfft=True)
-    assert rfft.shape == (1, 3, 8, 5)
-    assert rfft.dtype == torch.complex64
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 def test_device_move():
     ts = make_tilt_series("cpu")
-    assert "cpu" == str(ts.images.device)
+    assert "cpu" == str(ts.tilt_angles.device)
     ts.to("cuda")
-    assert "cuda" in str(ts.images.device)
     assert "cuda" in str(ts.tilt_angles.device)
     assert "cuda" in str(ts.tilt_axis_angle.device)
     assert "cuda" in str(ts.sample_translations.device)
     assert "cuda" in str(ts.x_tilts.device)
+    assert "cuda" in str(ts.sample2tomo.device)
 
 
 def test_from_aretomo_output(tmp_path):
-    alnfile = pytest.importorskip("alnfile")  # noqa: F841
-    mrcfile = pytest.importorskip("mrcfile")
+    pytest.importorskip("alnfile")
 
     aln = (
         "# AreTomo Alignment / Priims bprmMn\n"
@@ -192,19 +297,19 @@ def test_from_aretomo_output(tmp_path):
     )
     aln_path = tmp_path / "ts.aln"
     aln_path.write_text(aln)
-    images = np.random.default_rng(0).normal(size=(3, 16, 16)).astype(np.float32)
-    mrcfile.write(tmp_path / "ts.mrc", images, overwrite=True)
 
     pixel_spacing = 2.0
     ts = TiltSeries.from_aretomo_output(aln_path, pixel_spacing=pixel_spacing)
 
-    assert ts.images.shape == (3, 16, 16)
-    assert ts.pixel_spacing == pixel_spacing
     assert torch.allclose(ts.tilt_angles, torch.tensor([-30.0, 0.0, 30.0]))
     assert torch.allclose(ts.tilt_axis_angle, torch.zeros(3))
     # tx/ty are stored as (y, x) in Angstroms == (ty, tx) * pixel_spacing
     expected = torch.tensor([[2.0, 1.0], [0.0, 0.0], [-2.0, -1.0]]) * pixel_spacing
     assert torch.allclose(ts.sample_translations, expected)
+    # image loading metadata: never read here, only resolved
+    assert ts.image_path == aln_path.with_suffix(".mrc")
+    assert torch.equal(ts.image_indices, torch.tensor([0, 1, 2]))
+    assert ts.pixel_spacing == pixel_spacing
 
 
 def test_from_etomo_directory(tmp_path):
@@ -222,19 +327,24 @@ def test_from_etomo_directory(tmp_path):
         "1.0 0.0 0.0 1.0  0.0  0.0\n"
         "1.0 0.0 0.0 1.0 -1.0 -2.0\n"
     )
-    images = np.random.default_rng(0).normal(size=(3, 16, 16)).astype(np.float32)
+    # etomofiles.read() reads the MRC header to determine image count, even
+    # though torch_tilt_series never reads the pixel data itself.
+    images = np.zeros((3, 16, 16), dtype=np.float32)
     mrcfile.write(tmp_path / "ts.st", images, overwrite=True)
 
     pixel_spacing = 2.0
     ts = TiltSeries.from_etomo_directory(tmp_path, pixel_spacing=pixel_spacing)
 
-    assert ts.images.shape == (3, 16, 16)
-    assert ts.pixel_spacing == pixel_spacing
     assert torch.allclose(ts.tilt_angles, torch.tensor([-30.0, 0.0, 30.0]))
     assert torch.allclose(ts.tilt_axis_angle, torch.zeros(3))
     expected = torch.tensor([[-4.0, -2.0], [0.0, 0.0], [4.0, 2.0]])
     assert torch.allclose(ts.sample_translations, expected)
     assert torch.allclose(ts.x_tilts, torch.zeros(3))
+    # image loading metadata: never read here, only resolved
+    assert ts.image_path == tmp_path / "ts.st"
+    assert ts.image_indices is not None
+    assert ts.image_indices.shape == (3,)
+    assert ts.pixel_spacing == pixel_spacing
 
 
 def test_from_etomo_directory_reads_xtilt(tmp_path):
@@ -252,7 +362,7 @@ def test_from_etomo_directory_reads_xtilt(tmp_path):
         "1.0 0.0 0.0 1.0  0.0  0.0\n"
         "1.0 0.0 0.0 1.0  0.0  0.0\n"
     )
-    images = np.random.default_rng(0).normal(size=(3, 16, 16)).astype(np.float32)
+    images = np.zeros((3, 16, 16), dtype=np.float32)
     mrcfile.write(tmp_path / "ts.st", images, overwrite=True)
 
     ts = TiltSeries.from_etomo_directory(tmp_path, pixel_spacing=2.0)

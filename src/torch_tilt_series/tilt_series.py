@@ -1,4 +1,6 @@
-"""Tilt series geometry, projection and subtilt extraction for cryo-ET."""
+"""Tilt series geometry and point projection for cryo-ET."""
+
+from pathlib import Path
 
 import einops
 import numpy as np
@@ -6,8 +8,6 @@ import torch
 import torch.nn.functional as F
 from torch_affine_utils import homogenise_coordinates
 from torch_affine_utils.transforms_3d import Rx, Ry, Rz, T
-from torch_grid_utils import dft_center
-from torch_subpixel_crop import subpixel_crop_2d
 
 
 def _as_tensor(data, device: torch.device | str) -> torch.Tensor:
@@ -17,68 +17,166 @@ def _as_tensor(data, device: torch.device | str) -> torch.Tensor:
 
 
 class TiltSeries:
-    """Tilt series that enables projection and subtilt extraction."""
+    """Tilt series alignment geometry and 3D -> 2D point projection.
+
+    Holds alignment parameters, all in Angstroms, plus metadata describing
+    where matching raw tilt images live (`image_path`, `image_indices`,
+    `pixel_spacing`). It never reads or holds image pixel data itself.
+    `project_points` maps 3D points (Angstroms) to 2D detector positions
+    (Angstroms); loading/normalizing image data and converting to/from pixel
+    coordinates happen in `torch_reconstruct_tomogram`.
+
+    Coordinate spaces:
+    - sample space: canonical 3D space representing the sample before stage
+      rotation (`x_tilts` is defined here).
+    - tomogram space: arbitrary 3D reconstruction/visualization volume; may
+      be reoriented relative to sample space via `sample2tomo`. Points
+      passed to `project_points` are given in this space.
+    - microscope space: fixed 3D system, tilt axis pinned along y.
+    - detector space: 2D, rotated xy plane aligned to the detector's
+      row/col pixel axes.
+
+    named transforms
+        sample2tomo    : sample -> tomogram     (`self.sample2tomo`, default
+                                                   identity)
+        tomo2sample    : tomogram -> sample     (`self.tomo2sample`, inverse
+                                                   of sample2tomo)
+        sample2scope   : sample -> microscope   (`self.sample2scope`, per tilt)
+        scope2sample   : microscope -> sample   (`self.scope2sample`, inverse
+                                                   of sample2scope)
+        scope2detector : microscope -> detector (`self.scope2detector`, per
+                                                   tilt)
+        detector2scope : detector -> microscope (`self.detector2scope`,
+                                                   inverse of scope2detector;
+                                                   see caveat in its docstring)
+        projection_matrices = scope2detector @ sample2scope
+
+    `project_points` composes `tomo2sample` with `projection_matrices` to go
+    tomogram space -> detector space (Angstroms) in one call.
+    """
 
     def __init__(
         self,
         tilt_angles: torch.Tensor,
         tilt_axis_angle: torch.Tensor,
         sample_translations: torch.Tensor,
-        images: torch.Tensor,  # (b, h, w)
-        pixel_spacing: float,
         x_tilts: torch.Tensor | float = 0.0,
+        sample2tomo: torch.Tensor | None = None,
+        image_path: Path | str | None = None,
+        image_indices: torch.Tensor | np.ndarray | None = None,
+        pixel_spacing: float | None = None,
         device: torch.device | str = "cpu",
     ):
-        self.images = _as_tensor(images, device)
         self.tilt_angles = _as_tensor(tilt_angles, device)
         self.tilt_axis_angle = _as_tensor(tilt_axis_angle, device)
+        # Sample translations, in Angstroms, (y, x) per tilt.
         self.sample_translations = _as_tensor(sample_translations, device)
         # X-axis tilt (IMOD XAXISTILT / XTILTFILE), scalar or per-tilt, in degrees.
         self.x_tilts = _as_tensor(x_tilts, device)
+        # Rigid (expected) sample -> tomogram transform. Defaults to identity,
+        # i.e. tomogram space == sample space
+        self.sample2tomo = _as_tensor(
+            sample2tomo if sample2tomo is not None else torch.eye(4), device
+        )
+        self.image_path = Path(image_path) if image_path is not None else None
+        self.image_indices = (
+            torch.as_tensor(image_indices).long() if image_indices is not None else None
+        )
         self.pixel_spacing = pixel_spacing
         self.device = device
 
     @property
-    def sample_translations_px(self) -> torch.Tensor:
-        """Sample translations in pixels."""
-        return self.sample_translations / self.pixel_spacing
+    def tomo2sample(self) -> torch.Tensor:
+        """Inverse of sample2tomo: tomogram space -> sample space."""
+        return torch.linalg.inv(self.sample2tomo)
 
     @property
-    def projection_matrices(self) -> torch.Tensor:
-        """Matrices that project points from 3D -> 2D."""
-        shifts_3d = F.pad(self.sample_translations_px, (1, 0), value=0)
+    def sample2scope(self) -> torch.Tensor:
+        """Rotation from sample space to microscope space, per tilt.
+        """
         # X-axis tilt is an intrinsic property of the specimen, so it is applied
         # to sample points first (innermost), before the per-view stage tilt.
         rx = Rx(self.x_tilts, zyx=True, device=self.device)
         r0 = Ry(self.tilt_angles, zyx=True, device=self.device)
+        return r0 @ rx
+
+    @property
+    def scope2sample(self) -> torch.Tensor:
+        """Inverse of sample2scope: microscope space -> sample space, per tilt."""
+        return torch.linalg.inv(self.sample2scope)
+
+    @property
+    def scope2detector(self) -> torch.Tensor:
+        """Transform from microscope space to detector space, per tilt.
+
+        Aligns the microscope's fixed y/x axes to the detector's row/col
+        pixel axes (in-plane rotation by tilt_axis_angle about the
+        optical/Z axis), then adds the per-view 2D shift, in Angstroms.
+
+        Kept as a (n_tilts, 4, 4) matrix, matching `sample2scope`, even
+        though only the y/x output rows are physically meaningful once
+        applied to a scope-space point (z is an identity passthrough here).
+        Callers wanting genuine 2D coordinates take rows `[..., [1, 2], :]`,
+        as `project_points` does.
+        """
+        shifts_3d = F.pad(self.sample_translations, (1, 0), value=0)
         r1 = Rz(self.tilt_axis_angle, zyx=True, device=self.device)
         t2 = T(shifts_3d, device=self.device)
-        return t2 @ r1 @ r0 @ rx
+        return t2 @ r1
+
+    @property
+    def detector2scope(self) -> torch.Tensor:
+        """Inverse of scope2detector: detector space -> microscope space, per tilt.
+
+        Caveat: this inverts the full affine map on a homogeneous zyxw point
+        where z has NOT been dropped. Projecting scope space -> detector
+        space discards the z (depth/optical-axis) coordinate, and that
+        information is genuinely unrecoverable from a real 2D detector
+        position alone. This property exists for API symmetry; it is not a
+        way to reconstruct 3D scope-space points from actual 2D detector
+        coordinates without an assumed/known z (e.g. a defocus plane).
+        """
+        return torch.linalg.inv(self.scope2detector)
+
+    @property
+    def projection_matrices(self) -> torch.Tensor:
+        """Matrices that project points from sample space to detector space.
+
+        projection_matrices = scope2detector @ sample2scope
+        (T(shift) @ Rz(tilt_axis_angle) @ Ry(tilt_angle) @ Rx(x_tilt))
+
+        Does not include the sample2tomo/tomo2sample step:project_points
+        applies that separately, first.
+        """
+        return self.scope2detector @ self.sample2scope
 
     def to(self, device: torch.device | str) -> None:
-        """Move all objects of the tilt series to the device."""
+        """Move all tensors of the tilt series to the device."""
         self.device = device
-        self.images = self.images.to(device)
         self.tilt_angles = self.tilt_angles.to(device)
         self.tilt_axis_angle = self.tilt_axis_angle.to(device)
         self.sample_translations = self.sample_translations.to(device)
         self.x_tilts = self.x_tilts.to(device)
+        self.sample2tomo = self.sample2tomo.to(device)
 
     def project_points(self, points_zyx: torch.Tensor) -> torch.Tensor:
-        """Project 3D points to 2D image coordinates.
+        """Project 3D points to 2D detector coordinates, both in Angstroms.
 
-        - points are 3D zyx coordinates
-        - points are positions relative to center of tomogram
-        - projected 2D points are relative to center of 2D image
+        - points are 3D zyx coordinates, in Angstroms, positions relative to
+          the center of tomogram space (see `sample2tomo`)
+        - projected 2D points are in Angstroms, relative to the center of
+          the detector
         """
         points_zyx = torch.as_tensor(points_zyx, device=self.device).float()
 
-        # Convert from Angstroms to pixels for projection
-        points_zyx_px = points_zyx / self.pixel_spacing
+        # tomogram space -> sample space (identity by default: no-op)
+        points_zyxw = homogenise_coordinates(points_zyx)  # (n_points, 4)
+        points_zyxw = points_zyxw @ self.tomo2sample.T  # unbatched (4, 4), not per-tilt
+        points_zyx = points_zyxw[..., :3]
 
         # Apply projection matrices
         M_yx = self.projection_matrices[..., [1, 2], :]  # (ntilts, 2, 4)
-        points_zyxw = homogenise_coordinates(points_zyx_px)
+        points_zyxw = homogenise_coordinates(points_zyx)
         projected_yx = M_yx @ einops.rearrange(
             points_zyxw, "nparticles zyxw -> nparticles 1 zyxw 1"
         )
@@ -86,20 +184,3 @@ class TiltSeries:
             projected_yx, "nparticles ntilts yx 1 -> nparticles ntilts yx"
         )
         return projected_yx  # (points, tilts, yx)
-
-    def extract_particle_tilt_series(
-        self, points_zyx: torch.Tensor, sidelength: int, return_rfft: bool = True
-    ) -> torch.Tensor:
-        """Extract a subtilt-series at a 3D location in the sample."""
-        projected_yx = self.project_points(points_zyx)
-        projected_yx += dft_center(
-            self.images.shape[-2:], rfft=False, fftshift=True, device=self.device
-        )
-        images = subpixel_crop_2d(
-            image=self.images,
-            positions=projected_yx,
-            sidelength=sidelength,
-            return_rfft=return_rfft,
-            decenter=return_rfft,
-        )
-        return images
