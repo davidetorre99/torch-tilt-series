@@ -33,7 +33,8 @@ def test_construction(device):
     assert device in str(ts.tilt_angles.device)
     assert ts.image_path is None
     assert ts.image_indices is None
-    assert ts.pixel_spacing is None
+    with pytest.raises(ValueError, match="pixel_spacing is not set"):
+        _ = ts.pixel_spacing
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -267,6 +268,47 @@ def test_project_points_batch_shapes():
     ts = make_tilt_series()
     points = torch.zeros((5, 3))
     assert ts.project_points(points).shape == (5, 3, 2)
+
+
+def test_project_points_output_zyxw_round_trips_to_sample_space():
+    ts = make_tilt_series()
+    point_sample = torch.tensor([[0.0, 7.0, -4.0]])
+    zyxw = ts.project_points(point_sample, output_zyxw=True)
+    assert zyxw.shape == (1, 3, 4)
+
+    # dropping to yx must match the default (2D) output exactly
+    yx = ts.project_points(point_sample)
+    assert torch.allclose(zyxw[..., [1, 2]], yx, atol=1e-6)
+
+    # round trip: detector2scope then scope2sample recovers the original point
+    recovered = ts.scope2sample @ ts.detector2scope @ zyxw[..., None]
+    recovered = recovered[..., :3, 0]  # (n_points, n_tilts, 3)
+    expected = point_sample[:, None, :].expand(-1, 3, -1)
+    assert torch.allclose(recovered, expected, atol=1e-4)
+
+
+def test_project_points_local_shifts_applied_in_sample_space():
+    ts = make_tilt_series()
+    point = torch.tensor([[0.0, 7.0, -4.0]])
+    shift = torch.tensor([1.0, -2.0, 3.0])
+
+    def shift_fn(points_sample):
+        return shift.expand_as(points_sample)
+
+    shifted = ts.project_points(point, local_shifts=shift_fn)
+    expected = ts.project_points(point + shift)
+    assert torch.allclose(shifted, expected, atol=1e-5)
+
+
+def test_pixel_spacing_setter():
+    ts = make_tilt_series()
+    with pytest.raises(ValueError, match="pixel_spacing is not set"):
+        _ = ts.pixel_spacing
+    ts.pixel_spacing = 3.5
+    assert ts.pixel_spacing == 3.5
+    ts.pixel_spacing = None
+    with pytest.raises(ValueError, match="pixel_spacing is not set"):
+        _ = ts.pixel_spacing
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")

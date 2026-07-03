@@ -1,5 +1,6 @@
 """Tilt series geometry and point projection for cryo-ET."""
 
+from collections.abc import Callable
 from pathlib import Path
 
 import einops
@@ -9,14 +10,10 @@ import torch.nn.functional as F
 from torch_affine_utils import homogenise_coordinates
 from torch_affine_utils.transforms_3d import Rx, Ry, Rz, T
 
+LocalShiftFn = Callable[[torch.Tensor], torch.Tensor]
+
 
 def _writable(data):
-    """Copy non-writable numpy arrays (e.g. pandas .to_numpy() views) before
-    handing them to torch, which warns (and, with filterwarnings=["error"],
-    fails) on non-writable arrays -- whether a given array is writable can
-    depend on the numpy/pandas versions in use, so this must be applied to
-    every numpy array we hand to torch, not just some.
-    """
     if isinstance(data, np.ndarray) and not data.flags.writeable:
         data = data.copy()
     return data
@@ -94,8 +91,23 @@ class TiltSeries:
             if image_indices is not None
             else None
         )
-        self.pixel_spacing = pixel_spacing
+        self._pixel_spacing = pixel_spacing
         self.device = device
+
+    @property
+    def pixel_spacing(self) -> float:
+        """Pixel size of the raw images at image_path, in Angstroms."""
+        if self._pixel_spacing is None:
+            raise ValueError(
+                "pixel_spacing is not set -> construct the TiltSeries via a "
+                "torch_tilt_series loader (e.g. from_aretomo_output, "
+                "from_etomo_directory), or set it yourself."
+            )
+        return self._pixel_spacing
+
+    @pixel_spacing.setter
+    def pixel_spacing(self, value: float | None) -> None:
+        self._pixel_spacing = value
 
     @property
     def tomo2sample(self) -> torch.Tensor:
@@ -104,8 +116,7 @@ class TiltSeries:
 
     @property
     def sample2scope(self) -> torch.Tensor:
-        """Rotation from sample space to microscope space, per tilt.
-        """
+        """Rotation from sample space to microscope space, per tilt."""
         # X-axis tilt is an intrinsic property of the specimen, so it is applied
         # to sample points first (innermost), before the per-view stage tilt.
         rx = Rx(self.x_tilts, zyx=True, device=self.device)
@@ -171,13 +182,27 @@ class TiltSeries:
         self.x_tilts = self.x_tilts.to(device)
         self.sample2tomo = self.sample2tomo.to(device)
 
-    def project_points(self, points_zyx: torch.Tensor) -> torch.Tensor:
+    def project_points(
+        self,
+        points_zyx: torch.Tensor,
+        local_shifts: LocalShiftFn | None = None,
+        output_zyxw: bool = False,
+    ) -> torch.Tensor:
         """Project 3D points to 2D detector coordinates, both in Angstroms.
 
         - points are 3D zyx coordinates, in Angstroms, positions relative to
           the center of tomogram space (see `sample2tomo`)
         - projected 2D points are in Angstroms, relative to the center of
           the detector
+        - local_shifts, if provided, is called with the sample-space points
+          (n_points, 3), in Angstroms, after tomo2sample: tilt-independent,
+          applied once, before projection (e.g. for local sample
+          deformation/warping)
+        - output_zyxw, if True, skips dropping the z row: returns
+          (n_points, n_tilts, 4) zyxw instead of (n_points,
+          n_tilts, 2) yx. z here is scope-space depth (Rz leaves it
+          untouched), so this is enough to invert exactly back to sample
+          space via `scope2sample @ detector2scope`.
         """
         points_zyx = torch.as_tensor(_writable(points_zyx), device=self.device).float()
 
@@ -186,13 +211,18 @@ class TiltSeries:
         points_zyxw = points_zyxw @ self.tomo2sample.T  # unbatched (4, 4), not per-tilt
         points_zyx = points_zyxw[..., :3]
 
+        if local_shifts is not None:
+            points_zyx = points_zyx + local_shifts(points_zyx)
+
         # Apply projection matrices
-        M_yx = self.projection_matrices[..., [1, 2], :]  # (ntilts, 2, 4)
+        M = self.projection_matrices
+        if not output_zyxw:
+            M = M[..., [1, 2], :]
         points_zyxw = homogenise_coordinates(points_zyx)
-        projected_yx = M_yx @ einops.rearrange(
+        projected = M @ einops.rearrange(
             points_zyxw, "nparticles zyxw -> nparticles 1 zyxw 1"
         )
-        projected_yx = einops.rearrange(
-            projected_yx, "nparticles ntilts yx 1 -> nparticles ntilts yx"
+        projected = einops.rearrange(
+            projected, "nparticles ntilts c 1 -> nparticles ntilts c"
         )
-        return projected_yx  # (points, tilts, yx)
+        return projected  # (points, tilts, yx) or (points, tilts, zyxw)
