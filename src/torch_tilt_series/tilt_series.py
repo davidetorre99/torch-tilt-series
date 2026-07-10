@@ -35,27 +35,47 @@ class TiltSeries:
 
     Coordinate spaces:
     - sample space: canonical 3D space representing the sample before stage
-      rotation (`x_tilts` is defined here).
+      rotation (`x_tilts` is defined here). Volume deformations (e.g. local
+      warping) are modelled relative to this space -> see `local_shifts` on
+      `project_points`.
+    - levelled sample space: sample space plus a fixed, data-derived
+      correction (e.g. a leveling rotation), via `sample2levelled`.
     - tomogram space: arbitrary 3D reconstruction/visualization volume; may
-      be reoriented relative to sample space via `sample2tomo`. Points
-      passed to `project_points` are given in this space.
+      be reoriented relative to levelled sample space via `levelled2tomo`.
+      Points passed to `project_points` are given in this space.
     - microscope space: fixed 3D system, tilt axis pinned along y.
     - detector space: 2D, rotated xy plane aligned to the detector's
       row/col pixel axes.
 
     named transforms
-        sample2tomo    : sample -> tomogram     (`self.sample2tomo`, default
-                                                   identity)
-        tomo2sample    : tomogram -> sample     (`self.tomo2sample`, inverse
-                                                   of sample2tomo)
-        sample2scope   : sample -> microscope   (`self.sample2scope`, per tilt)
-        scope2sample   : microscope -> sample   (`self.scope2sample`, inverse
-                                                   of sample2scope)
-        scope2detector : microscope -> detector (`self.scope2detector`, per
-                                                   tilt)
-        detector2scope : detector -> microscope (`self.detector2scope`,
-                                                   inverse of scope2detector;
-                                                   see caveat in its docstring)
+        sample2levelled : sample -> levelled sample   (`self.sample2levelled`,
+                                                         default identity)
+        levelled2sample : levelled sample -> sample   (`self.levelled2sample`,
+                                                         inverse of
+                                                         sample2levelled)
+        levelled2tomo   : levelled sample -> tomogram (`self.levelled2tomo`,
+                                                         default identity)
+        tomo2levelled   : tomogram -> levelled sample (`self.tomo2levelled`,
+                                                         inverse of
+                                                         levelled2tomo)
+        sample2tomo     : sample -> tomogram          (`self.sample2tomo`,
+                                                         = levelled2tomo @
+                                                         sample2levelled)
+        tomo2sample     : tomogram -> sample          (`self.tomo2sample`,
+                                                         inverse of
+                                                         sample2tomo)
+        sample2scope    : sample -> microscope        (`self.sample2scope`,
+                                                         per tilt)
+        scope2sample    : microscope -> sample        (`self.scope2sample`,
+                                                         inverse of
+                                                         sample2scope)
+        scope2detector  : microscope -> detector      (`self.scope2detector`,
+                                                         per tilt)
+        detector2scope  : detector -> microscope      (`self.detector2scope`,
+                                                         inverse of
+                                                         scope2detector; see
+                                                         caveat in its
+                                                         docstring)
         projection_matrices = scope2detector @ sample2scope
 
     `project_points` composes `tomo2sample` with `projection_matrices` to go
@@ -68,7 +88,8 @@ class TiltSeries:
         tilt_axis_angle: torch.Tensor,
         sample_translations: torch.Tensor,
         x_tilts: torch.Tensor | float = 0.0,
-        sample2tomo: torch.Tensor | None = None,
+        sample2levelled: torch.Tensor | None = None,
+        levelled2tomo: torch.Tensor | None = None,
         image_path: Path | str | None = None,
         image_indices: torch.Tensor | np.ndarray | None = None,
         pixel_spacing: float | None = None,
@@ -80,10 +101,15 @@ class TiltSeries:
         self.sample_translations = _as_tensor(sample_translations, device)
         # X-axis tilt (IMOD XAXISTILT / XTILTFILE), scalar or per-tilt, in degrees.
         self.x_tilts = _as_tensor(x_tilts, device)
-        # Rigid (expected) sample -> tomogram transform. Defaults to identity,
-        # i.e. tomogram space == sample space
-        self.sample2tomo = _as_tensor(
-            sample2tomo if sample2tomo is not None else torch.eye(4), device
+        # sample -> levelled-sample correction. Defaults
+        # to identity.
+        self.sample2levelled = _as_tensor(
+            sample2levelled if sample2levelled is not None else torch.eye(4), device
+        )
+        # Arbitrary levelled-sample -> tomogram transform.
+        # Defaults to identity, i.e. tomogram space == levelled sample space.
+        self.levelled2tomo = _as_tensor(
+            levelled2tomo if levelled2tomo is not None else torch.eye(4), device
         )
         self.image_path = Path(image_path) if image_path is not None else None
         self.image_indices = (
@@ -108,6 +134,21 @@ class TiltSeries:
     @pixel_spacing.setter
     def pixel_spacing(self, value: float | None) -> None:
         self._pixel_spacing = value
+
+    @property
+    def levelled2sample(self) -> torch.Tensor:
+        """Inverse of sample2levelled: levelled sample space -> sample space."""
+        return torch.linalg.inv(self.sample2levelled)
+
+    @property
+    def tomo2levelled(self) -> torch.Tensor:
+        """Inverse of levelled2tomo: tomogram space -> levelled sample space."""
+        return torch.linalg.inv(self.levelled2tomo)
+
+    @property
+    def sample2tomo(self) -> torch.Tensor:
+        """Composition of sample2levelled and levelled2tomo: sample -> tomogram."""
+        return self.levelled2tomo @ self.sample2levelled
 
     @property
     def tomo2sample(self) -> torch.Tensor:
@@ -180,7 +221,8 @@ class TiltSeries:
         self.tilt_axis_angle = self.tilt_axis_angle.to(device)
         self.sample_translations = self.sample_translations.to(device)
         self.x_tilts = self.x_tilts.to(device)
-        self.sample2tomo = self.sample2tomo.to(device)
+        self.sample2levelled = self.sample2levelled.to(device)
+        self.levelled2tomo = self.levelled2tomo.to(device)
 
     def project_points(
         self,

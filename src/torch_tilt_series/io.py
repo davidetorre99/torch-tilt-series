@@ -96,9 +96,10 @@ def from_etomo_directory(
     if not tilt_stack_path.is_absolute():
         tilt_stack_path = etomo_dir / tilt_stack_path
 
-    # sample2tomo left at its default identity: this loader draws no
-    # distinction between tomogram space and sample space. A caller wanting
-    # a leveled/reoriented tomogram frame sets `ts.sample2tomo` afterwards.
+    # sample2levelled/levelled2tomo left at their default identity: this
+    # loader draws no distinction between sample, levelled sample, and
+    # tomogram space. A caller wanting a leveled correction or an arbitrary
+    # reframing sets `ts.sample2levelled`/`ts.levelled2tomo` afterwards.
     return TiltSeries(
         tilt_angles=df["tlt"].to_numpy(),
         tilt_axis_angle=df["tilt_axis_angle"].to_numpy(),

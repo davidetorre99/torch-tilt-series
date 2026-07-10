@@ -173,14 +173,14 @@ def test_tomo2sample_is_inverse_of_sample2tomo():
         ts_default.sample2tomo @ ts_default.tomo2sample, torch.eye(4), atol=1e-6
     )
 
-    sample2tomo = T(torch.tensor([1.0, -2.0, 3.0]), device="cpu") @ Rz(
+    levelled2tomo = T(torch.tensor([1.0, -2.0, 3.0]), device="cpu") @ Rz(
         torch.tensor(40.0), zyx=True, device="cpu"
     )
     ts = TiltSeries(
         tilt_angles=torch.tensor([0.0]),
         tilt_axis_angle=torch.tensor(0.0),
         sample_translations=torch.zeros((1, 2)),
-        sample2tomo=sample2tomo,
+        levelled2tomo=levelled2tomo,
     )
     assert torch.allclose(ts.sample2tomo @ ts.tomo2sample, torch.eye(4), atol=1e-5)
 
@@ -195,7 +195,8 @@ def test_sample2tomo_default_is_identity_no_behavior_change():
         tilt_angles=torch.tensor([-30.0, 0.0, 30.0]),
         tilt_axis_angle=torch.tensor(0.0),
         sample_translations=torch.zeros((3, 2)),
-        sample2tomo=torch.eye(4),
+        sample2levelled=torch.eye(4),
+        levelled2tomo=torch.eye(4),
     )
     assert torch.allclose(with_default, ts_explicit.project_points(points), atol=1e-6)
 
@@ -206,13 +207,13 @@ def test_sample2tomo_pure_translation_shifts_projection():
     # So tomo2sample = T(-shift): recovering the sample-space point from a
     # tomogram-space coordinate requires *subtracting* the shift.
     shift_zyx = torch.tensor([2.0, -3.0, 5.0])
-    sample2tomo = T(shift_zyx, device="cpu")
+    levelled2tomo = T(shift_zyx, device="cpu")
     ts_notomo = make_tilt_series()
     ts_tomo = TiltSeries(
         tilt_angles=torch.tensor([-30.0, 0.0, 30.0]),
         tilt_axis_angle=torch.tensor(0.0),
         sample_translations=torch.zeros((3, 2)),
-        sample2tomo=sample2tomo,
+        levelled2tomo=levelled2tomo,
     )
     point_tomo = torch.tensor([[0.0, 0.0, 0.0]])
     point_sample_equivalent = point_tomo - shift_zyx
@@ -226,16 +227,16 @@ def test_sample2tomo_pure_translation_shifts_projection():
 def test_sample2tomo_pure_rotation_matches_manual_transform():
     # A 90 degree Rz sample2tomo: points_tomo -> tomo2sample -> points_sample
     # should equal applying tomo2sample directly, computed independently.
-    sample2tomo = Rz(torch.tensor(90.0), zyx=True, device="cpu")
+    levelled2tomo = Rz(torch.tensor(90.0), zyx=True, device="cpu")
     ts_notomo = make_tilt_series()
     ts_tomo = TiltSeries(
         tilt_angles=torch.tensor([-30.0, 0.0, 30.0]),
         tilt_axis_angle=torch.tensor(0.0),
         sample_translations=torch.zeros((3, 2)),
-        sample2tomo=sample2tomo,
+        levelled2tomo=levelled2tomo,
     )
     point_tomo = torch.tensor([[0.0, 1.0, 0.0]])  # pure +y in tomo space
-    tomo2sample = torch.linalg.inv(sample2tomo)
+    tomo2sample = torch.linalg.inv(levelled2tomo)
     point_tomo_w = torch.cat([point_tomo, torch.ones(1, 1)], dim=-1)
     point_sample = (point_tomo_w @ tomo2sample.T)[:, :3]
     assert torch.allclose(
@@ -243,6 +244,75 @@ def test_sample2tomo_pure_rotation_matches_manual_transform():
         ts_notomo.project_points(point_sample),
         atol=1e-5,
     )
+
+
+def test_sample2tomo_is_composition_of_sample2levelled_and_levelled2tomo():
+    sample2levelled = Rz(torch.tensor(15.0), zyx=True, device="cpu")
+    levelled2tomo = T(torch.tensor([1.0, -2.0, 3.0]), device="cpu") @ Rz(
+        torch.tensor(40.0), zyx=True, device="cpu"
+    )
+    ts = TiltSeries(
+        tilt_angles=torch.tensor([0.0]),
+        tilt_axis_angle=torch.tensor(0.0),
+        sample_translations=torch.zeros((1, 2)),
+        sample2levelled=sample2levelled,
+        levelled2tomo=levelled2tomo,
+    )
+    assert torch.allclose(ts.sample2tomo, levelled2tomo @ sample2levelled, atol=1e-6)
+    assert torch.allclose(
+        ts.tomo2sample, torch.linalg.inv(levelled2tomo @ sample2levelled), atol=1e-5
+    )
+
+
+def test_levelled2sample_is_inverse_of_sample2levelled():
+    ts_default = make_tilt_series()
+    assert torch.allclose(
+        ts_default.sample2levelled @ ts_default.levelled2sample,
+        torch.eye(4),
+        atol=1e-6,
+    )
+
+    sample2levelled = Rz(torch.tensor(15.0), zyx=True, device="cpu")
+    ts = TiltSeries(
+        tilt_angles=torch.tensor([0.0]),
+        tilt_axis_angle=torch.tensor(0.0),
+        sample_translations=torch.zeros((1, 2)),
+        sample2levelled=sample2levelled,
+    )
+    assert torch.allclose(
+        ts.sample2levelled @ ts.levelled2sample, torch.eye(4), atol=1e-5
+    )
+
+
+def test_tomo2levelled_is_inverse_of_levelled2tomo():
+    ts_default = make_tilt_series()
+    assert torch.allclose(
+        ts_default.levelled2tomo @ ts_default.tomo2levelled, torch.eye(4), atol=1e-6
+    )
+
+    levelled2tomo = T(torch.tensor([1.0, -2.0, 3.0]), device="cpu")
+    ts = TiltSeries(
+        tilt_angles=torch.tensor([0.0]),
+        tilt_axis_angle=torch.tensor(0.0),
+        sample_translations=torch.zeros((1, 2)),
+        levelled2tomo=levelled2tomo,
+    )
+    assert torch.allclose(ts.levelled2tomo @ ts.tomo2levelled, torch.eye(4), atol=1e-5)
+
+
+def test_sample2levelled_is_protected_from_levelled2tomo_reassignment():
+    # The whole point of the split: reassigning levelled2tomo (an arbitrary,
+    # user-owned reframing choice) must never touch sample2levelled (a fixed,
+    # data-derived correction).
+    sample2levelled = Rz(torch.tensor(15.0), zyx=True, device="cpu")
+    ts = TiltSeries(
+        tilt_angles=torch.tensor([0.0]),
+        tilt_axis_angle=torch.tensor(0.0),
+        sample_translations=torch.zeros((1, 2)),
+        sample2levelled=sample2levelled,
+    )
+    ts.levelled2tomo = T(torch.tensor([5.0, 0.0, 0.0]), device="cpu")
+    assert torch.allclose(ts.sample2levelled, sample2levelled, atol=1e-6)
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -320,7 +390,8 @@ def test_device_move():
     assert "cuda" in str(ts.tilt_axis_angle.device)
     assert "cuda" in str(ts.sample_translations.device)
     assert "cuda" in str(ts.x_tilts.device)
-    assert "cuda" in str(ts.sample2tomo.device)
+    assert "cuda" in str(ts.sample2levelled.device)
+    assert "cuda" in str(ts.levelled2tomo.device)
 
 
 def test_from_aretomo_output(tmp_path):
